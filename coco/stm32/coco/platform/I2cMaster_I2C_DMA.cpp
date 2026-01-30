@@ -1,41 +1,50 @@
 #include "I2cMaster_I2C_DMA.hpp"
-#include <coco/debug.hpp>
+//#include <coco/debug.hpp>
 #include <algorithm>
 
 
+/*
+    I2C NACK conditions:
+    1. No receiver is present on the bus with the transmitted address so there is no device to respond with an acknowledge.
+    2. The receiver is unable to receive or transmit because it is performing some real-time function and is not ready to start communication with the master.
+    3. During the transfer, the receiver gets data or commands that it does not understand.
+    4. During the transfer, the receiver cannot receive any more data bytes.
+    5. A master-receiver must signal the end of the transfer to the slave transmitter.
+*/
 namespace coco {
 
 // I2cMaster_I2C_DMA
 
 I2cMaster_I2C_DMA::I2cMaster_I2C_DMA(Loop_Queue &loop, gpio::Config sclPin, gpio::Config sdaPin,
-    const i2c::Info &i2cInfo, const dma::Info2 &dmaInfo, uint32_t timing)
-    : loop(loop)
+    const i2c::Info &i2cInfo, const dma::DualInfo<> &dmaInfo, uint32_t timing)
+    : loop_(loop)
 {
-    // enable clocks (note two cycles wait time until peripherals can be accessed, see STM32G4 reference manual section 7.2.17)
+    // enable clocks
     i2cInfo.rcc.enableClock();
-    dmaInfo.rcc.enableClock();
+    //dmaInfo.rcc.enableClock();
 
     // configure I2C pins
-    gpio::configureAlternate(sclPin);
-    gpio::configureAlternate(sdaPin);
+    gpio::enableAlternate(sclPin);
+    gpio::enableAlternate(sdaPin);
 
     // initialize I2C
-    auto i2c = this->i2c = i2cInfo.i2c;
+    auto i2c = i2c_ = i2cInfo.i2c;
     i2c->TIMINGR = timing;
     i2c->CR1 = I2C_CR1_PE // enable I2C
         | I2C_CR1_RXDMAEN | I2C_CR1_TXDMAEN // DMA mode
         | I2C_CR1_TCIE // interrupt on transfer complete
         | I2C_CR1_STOPIE; // interrupt on STOP
-    this->i2cIrq = i2cInfo.irq;
-    nvic::setPriority(this->i2cIrq, nvic::Priority::MEDIUM); // interrupt gets enabled in first call to start()
+    i2cIrq_ = i2cInfo.irq;
+    nvic::setPriority(i2cIrq_, nvic::Priority::MEDIUM); // interrupt gets enabled in first call to start()
 
-    // initialize RX DMA channel
-    this->rxChannel = dmaInfo.channel1();
-    this->rxChannel.setPeripheralAddress(&i2c->RXDR);
-
-    // initialize TX DMA channel
-    this->txChannel = dmaInfo.channel2();
-    this->txChannel.setPeripheralAddress(&i2c->TXDR);
+    // configure DMA channels
+    auto [rxChannel, txChannel] = dmaInfo.enableClock<RxChannel::MODE, TxChannel::MODE>();
+    rxChannel_ = rxChannel
+        .configure()
+        .setSourceAddress(&i2c->RXDR);
+    txChannel_ = txChannel
+        .configure()
+        .setDestinationAddress(&i2c->TXDR);
 
     // map DMA to I2C
     i2cInfo.map(dmaInfo);
@@ -45,57 +54,108 @@ I2cMaster_I2C_DMA::~I2cMaster_I2C_DMA() {
 }
 
 void I2cMaster_I2C_DMA::recover() {
-    nvic::disable(this->i2cIrq);
-    if (this->recoverCount == 0 && this->transfers.empty())
+    nvic::disable(i2cIrq_);
+    if (recoverCount_ == 0 && transfers_.empty())
         startRecover();
-    ++this->recoverCount;
-    nvic::enable(this->i2cIrq);
+    ++recoverCount_;
+    nvic::enable(i2cIrq_);
 }
 
 void I2cMaster_I2C_DMA::I2C_IRQHandler() {
-    debug::setRed();
-        // check if read DMA has completed
-    if ((this->i2c->ISR & I2C_ISR_TCR) != 0) {
-        // interrupt flag gets cleared by writing NBYTES
-        int count = this->transferCount;
-        int address = this->i2c->CR2 & I2C_CR2_SADD_Msk;
+    auto i2c = i2c_;
+    if ((i2c->ISR & I2C_ISR_TCR) != 0) {
+        // transfer complete reload: interrupt flag gets cleared by writing NBYTES
+        int count = transferCount_;
+        uint32_t cr2 = i2c->CR2 & (I2C_CR2_SADD_Msk | I2C_CR2_RD_WRN_Msk | I2C_CR2_AUTOEND); // keep slave address, read/write flag and AUTOEND
         if (count > 255) {
-            this->i2c->CR2 = I2C_CR2_RELOAD // reload next section of up to 255 bytes
-                | (255 << I2C_CR2_NBYTES_Pos) // number of bytes to write
-                | address; // slave address
-            this->transferCount = count - 255;
+            // reload after 255 bytes
+            cr2 |= I2C_CR2_RELOAD | (255 << I2C_CR2_NBYTES_Pos);
+            transferCount_ = count - 255;
         } else {
-            this->i2c->CR2 = I2C_CR2_AUTOEND // automatically generate STOP
-                | (count << I2C_CR2_NBYTES_Pos) // number of bytes to write
+            // automatically generate STOP
+            cr2 |= count << I2C_CR2_NBYTES_Pos;
+        }
+        i2c->CR2 = cr2;
+    } else if ((i2c->ISR & I2C_ISR_TC) != 0) {
+        // transfer complete (RELOAD = 0, AUTOEND = 0): read after writing header
+        auto &buffer = transfers_.front();
+
+        int count = buffer.size_;// - buffer.p.headerSize;
+        if (count == 0) {
+            i2c->CR2 = I2C_CR2_STOP; // generate stop on bus
+            // -> I2Cx_IRQHandler()
+        } else {
+            volatile void *data = buffer.data_;// + buffer.p.headerSize;
+            int address = i2c->CR2 & I2C_CR2_SADD_Msk;
+
+            uint32_t cr2 = I2C_CR2_START // generate start on bus
+                | I2C_CR2_RD_WRN // write
                 | address; // slave address
+            if (count > 255) {
+                // reload after 255 bytes
+                cr2 |= I2C_CR2_RELOAD | (255 << I2C_CR2_NBYTES_Pos);
+                transferCount_ = count - 255;
+            } else {
+                // automatically generate STOP
+                cr2 |= count << I2C_CR2_NBYTES_Pos;
+            }
+            cr2 |= I2C_CR2_AUTOEND;
+            i2c->CR2 = cr2;
+
+            // configure and enable DMA
+            rxChannel_
+                .setDestinationAddress(data)
+                .setCount(count)
+                .enable();
+            // -> I2Cx_IRQHandler()
         }
     }
-    if ((this->i2c->ISR & I2C_ISR_STOPF) != 0) {
-        // clear interrupt flag at peripheral
-        this->i2c->ICR = I2C_ICR_STOPCF;
+
+    if ((i2c->ISR & I2C_ISR_STOPF) != 0) {
+        // stopped: clear interrupt flag at peripheral
+        i2c->ICR = I2C_ICR_STOPCF;
 
         // end of transfer
 
         // disable DMA
-        this->rxChannel.disable();//->CCR = 0;
-        this->txChannel.disable();//->CCR = 0;
+        rxChannel_.disable();
+        txChannel_.disable();
 
-        if (this->recovering) {
-            this->recovering = false;
-            --this->recoverCount;
+        if (recovering_) {
+            recovering_ = false;
+            --recoverCount_;
         } else {
-            this->transfers.pop(
-                [this](BufferBase &buffer) {
-                    this->loop.push(buffer);
+            transfers_.pop(
+                [this, i2c](BufferBase &buffer) {
+                    // set result
+                    bool nack = (i2c->ISR & I2C_ISR_NACKF) != 0;
+                    if (nack) {
+                        // set size
+                        if ((i2c->CR2 & I2C_CR2_AUTOEND) == 0) {
+                            // stopped when still transferring the header of a read operation: clear
+                            buffer.clear();
+                        } else {
+                            // stopped during read or write
+                            bool write = (buffer.op_ & BufferBase::Op::WRITE) != 0;
+                            buffer.size_ -= write ? txChannel_.count() : rxChannel_.count();
+                        }
+                        buffer.result_ = BufferBase::Result::NO_REPLY;
+                    } else {
+                        buffer.result_ = BufferBase::Result::SUCCESS;
+                    }
+                    i2c->ICR = I2C_ICR_NACKCF;
+
+                    // pass buffer to event loop so that the application can be notified
+                    loop_.push(buffer);
                     return true;
                 }
             );
         }
 
-        if (this->recoverCount > 0) {
+        if (recoverCount_ > 0) {
             startRecover();
         } else {
-            auto next = this->transfers.frontOrNull();
+            auto next = transfers_.frontOrNull();
             if (next != nullptr)
                 next->start();
         }
@@ -103,43 +163,41 @@ void I2cMaster_I2C_DMA::I2C_IRQHandler() {
 }
 
 void I2cMaster_I2C_DMA::startRecover() {
-    this->recovering = true;
-    int address = (0x7f << (I2C_CR2_SADD_Pos + 1)) | I2C_CR2_RD_WRN; // address and read flag (1)
-    this->i2c->CR2 = I2C_CR2_START // generate start on bus
+    recovering_ = true;
+    int address = (0xfe << I2C_CR2_SADD_Pos) | I2C_CR2_RD_WRN; // address and read flag
+    i2c_->CR2 = I2C_CR2_START // generate start on bus
         | I2C_CR2_AUTOEND // automatically generate STOP
         | address;
 }
 
 
-// BufferBase
+// I2cMaster_I2C_DMA::BufferBase
 
-I2cMaster_I2C_DMA::BufferBase::BufferBase(uint8_t *data, int capacity, Channel &channel)
-    : coco::Buffer(data, capacity, BufferBase::State::READY), channel(channel)
+I2cMaster_I2C_DMA::BufferBase::BufferBase(uint8_t *headerAndData, int headerCapacity, int capacity, Channel &channel)
+    : coco::Buffer(headerAndData, headerCapacity, headerCapacity, capacity, BufferBase::State::READY), channel_(channel)
 {
-    channel.buffers.add(*this);
+    channel.buffers_.add(*this);
 }
 
 I2cMaster_I2C_DMA::BufferBase::~BufferBase() {
 }
 
 bool I2cMaster_I2C_DMA::BufferBase::start(Op op) {
-    if (this->st.state != State::READY) {
-        assert(this->st.state != State::BUSY);
+    if (st.state != State::READY || (op & Op::READ_WRITE) == 0 || size_ == 0) {
+        // starting a buffer when the state is BUSY is a bug
+        assert(st.state != State::BUSY);
         return false;
     }
 
-    // check if READ or WRITE flag is set
-    assert((op & Op::READ_WRITE) != 0);
-
-    this->op = op;
-    auto &device = this->channel.device;
+    op_ = op;
+    auto &device = channel_.device_;
 
     {
-        nvic::Guard guard(device.i2cIrq);
+        nvic::Guard guard(device.i2cIrq_);
 
         // add to list of pending transfers and start immediately if list was empty
-        if (device.transfers.push(*this)) {
-            if (device.recoverCount == 0)
+        if (device.transfers_.push(*this)) {
+            if (device.recoverCount_ == 0)
                 start();
         }
     }
@@ -151,57 +209,72 @@ bool I2cMaster_I2C_DMA::BufferBase::start(Op op) {
 }
 
 bool I2cMaster_I2C_DMA::BufferBase::cancel() {
-    if (this->st.state != State::BUSY)
+    if (st.state != State::BUSY)
         return false;
-    auto &device = this->channel.device;
+    auto &device = channel_.device_;
 
     // remove from pending transfers if not yet started, otherwise complete normally
-    if (device.transfers.remove(nvic::Guard(device.i2cIrq), *this, false))
+    if (device.transfers_.remove(nvic::Guard(device.i2cIrq_), *this, false))
         setReady(0);
 
     return true;
 }
 
 void I2cMaster_I2C_DMA::BufferBase::start() {
-    //this->inProgress = true;
-    auto &device = this->channel.device;
+    auto &device = channel_.device_;
 
-    //debug::set(0);
-
-    //int writeSize = 0;
-    //int readSize = 0;
-    if ((this->op & Op::WRITE) == 0) {
+    volatile void *data = header_;
+    int headerSize = headerCapacity_;
+    int address = channel_.address_ << (I2C_CR2_SADD_Pos + 1); // slave address
+    bool write = (op_ & Op::WRITE) != 0;
+    if (!write && headerSize == 0) {
         // read
-        //int commandCount = std::min(int(this->op & Op::COMMAND_MASK) >> COMMAND_SHIFT, this->p.size);
-        //writeSize = commandCount;
-        //readSize = this->xferred - commandCount;
-
-
-    } else {
-        // write
-        //debug::setRed();
-        auto data = this->p.data;
-        int count = this->p.size;
-
-        int address = this->channel.address << (I2C_CR2_SADD_Pos + 1); // address and write flag (0)
+        //writeHeader = false;
+        int count = size_;
+        uint32_t cr2 = I2C_CR2_START // generate start on bus
+            | I2C_CR2_RD_WRN // read
+            | address; // slave address
         if (count > 255) {
-            device.i2c->CR2 = I2C_CR2_START // generate start on bus
-                | I2C_CR2_RELOAD // reload next section of up to 255 bytes
-                | (255 << I2C_CR2_NBYTES_Pos) // number of bytes to write
-                | address; // slave address
-            device.transferCount = count - 255;
+            // reload after 255 bytes
+            cr2 |= I2C_CR2_RELOAD | (255 << I2C_CR2_NBYTES_Pos);
+            device.transferCount_ = count - 255;
         } else {
-            device.i2c->CR2 = I2C_CR2_START // generate start on bus
-                | I2C_CR2_AUTOEND // automatically generate STOP
-                | (count << I2C_CR2_NBYTES_Pos) // number of bytes to write
-                | address; // slave address
+            // automatically generate STOP
+            cr2 |= count << I2C_CR2_NBYTES_Pos;
         }
+        cr2 |= I2C_CR2_AUTOEND;
+        device.i2c_->CR2 = cr2;
 
         // configure and enable DMA
-        device.txChannel.setMemoryAddress(data);
-        device.txChannel.setCount(count);
-        device.txChannel.enable(dma::Channel::Config::TX);
+        device.rxChannel_
+            .setDestinationAddress(data)
+            .setCount(count)
+            .enable();
+        // -> I2Cx_IRQHandler()
+    } else {
+        // write data or header of read operation
+        //writeHeader_ = false;
+        int count = headerSize + (write ? size_ : 0);
+        uint32_t cr2 = I2C_CR2_START // generate start on bus
+            | 0 // write (RD_WRN = 0)
+            | address; // slave address
+        if (count > 255) {
+            // reload after 255 bytes
+            cr2 |= I2C_CR2_RELOAD | (255 << I2C_CR2_NBYTES_Pos);
+            device.transferCount_ = count - 255;
+        } else {
+            // write: automatically generate STOP, read: restart on TC
+            cr2 |= (count << I2C_CR2_NBYTES_Pos);
+        }
+        if (write)
+            cr2 |= I2C_CR2_AUTOEND;
+        device.i2c_->CR2 = cr2;
 
+        // configure and enable DMA
+        device.txChannel_
+            .setSourceAddress(data)
+            .setCount(count)
+            .enable();
         // -> I2Cx_IRQHandler()
     }
 }
@@ -211,11 +284,11 @@ void I2cMaster_I2C_DMA::BufferBase::handle() {
 }
 
 
-// Channel
+// I2cMaster_I2C_DMA::Channel
 
 I2cMaster_I2C_DMA::Channel::Channel(I2cMaster_I2C_DMA &device, int address)
     : BufferDevice(State::READY)
-    , device(device), address(address)
+    , device_(device), address_(address)
 {
 }
 
@@ -223,11 +296,11 @@ I2cMaster_I2C_DMA::Channel::~Channel() {
 }
 
 int I2cMaster_I2C_DMA::Channel::getBufferCount() {
-    return this->buffers.count();
+    return buffers_.count();
 }
 
 I2cMaster_I2C_DMA::BufferBase &I2cMaster_I2C_DMA::Channel::getBuffer(int index) {
-    return this->buffers.get(index);
+    return buffers_.get(index);
 }
 
 } // namespace coco
