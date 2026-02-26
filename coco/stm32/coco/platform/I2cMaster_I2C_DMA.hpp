@@ -56,15 +56,15 @@ public:
         ~BufferBase() override;
 
         // Buffer methods
-        bool start(Op op) override;
+        bool start() override;
         bool cancel() override;
 
     protected:
-        void start();
+        void transfer();
         void handle() override;
 
         Channel &channel_;
-        Op op_;
+        //Op op_;
     };
 
     /// @brief Virtual channel to a slave device using a dedicated address.

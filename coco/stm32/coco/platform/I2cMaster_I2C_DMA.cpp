@@ -139,9 +139,11 @@ void I2cMaster_I2C_DMA::I2C_IRQHandler() {
                             bool write = (buffer.op_ & BufferBase::Op::WRITE) != 0;
                             buffer.size_ -= write ? txChannel_.count() : rxChannel_.count();
                         }
-                        buffer.result_ = BufferBase::Result::NO_REPLY;
+                        //buffer.result_ = BufferBase::Result::NO_REPLY;
+                        buffer.setError(std::errc::no_such_device_or_address);
                     } else {
-                        buffer.result_ = BufferBase::Result::SUCCESS;
+                        buffer.setSuccess();
+                        //buffer.result_ = BufferBase::Result::SUCCESS;
                     }
                     i2c->ICR = I2C_ICR_NACKCF;
 
@@ -174,7 +176,7 @@ void I2cMaster_I2C_DMA::startRecover() {
 // I2cMaster_I2C_DMA::BufferBase
 
 I2cMaster_I2C_DMA::BufferBase::BufferBase(uint8_t *headerAndData, int headerCapacity, int capacity, Channel &channel)
-    : coco::Buffer(headerAndData, headerCapacity, headerCapacity, capacity, BufferBase::State::READY), channel_(channel)
+    : coco::Buffer(headerAndData, headerCapacity, capacity, BufferBase::State::READY), channel_(channel)
 {
     channel.buffers_.add(*this);
 }
@@ -182,14 +184,14 @@ I2cMaster_I2C_DMA::BufferBase::BufferBase(uint8_t *headerAndData, int headerCapa
 I2cMaster_I2C_DMA::BufferBase::~BufferBase() {
 }
 
-bool I2cMaster_I2C_DMA::BufferBase::start(Op op) {
-    if (st.state != State::READY || (op & Op::READ_WRITE) == 0 || size_ == 0) {
+bool I2cMaster_I2C_DMA::BufferBase::start() {
+    if (state_ != State::READY || (op_ & Op::READ_WRITE) == 0 || size_ == 0) {
         // starting a buffer when the state is BUSY is a bug
-        assert(st.state != State::BUSY);
+        assert(state_ != State::BUSY);
         return false;
     }
 
-    op_ = op;
+    //op_ = op;
     auto &device = channel_.device_;
 
     {
@@ -209,18 +211,22 @@ bool I2cMaster_I2C_DMA::BufferBase::start(Op op) {
 }
 
 bool I2cMaster_I2C_DMA::BufferBase::cancel() {
-    if (st.state != State::BUSY)
+    if (state_ != State::BUSY)
         return false;
     auto &device = channel_.device_;
 
     // remove from pending transfers if not yet started, otherwise complete normally
-    if (device.transfers_.remove(nvic::Guard(device.i2cIrq_), *this, false))
-        setReady(0);
+    if (device.transfers_.remove(nvic::Guard(device.i2cIrq_), *this, false)) {
+        // cancel succeeded: set buffer ready again
+        // resume application code, therefore interrupt is enabled at this point
+        setError(std::errc::operation_canceled);
+        setReady();
+    }
 
     return true;
 }
 
-void I2cMaster_I2C_DMA::BufferBase::start() {
+void I2cMaster_I2C_DMA::BufferBase::transfer() {
     auto &device = channel_.device_;
 
     volatile void *data = header_;
