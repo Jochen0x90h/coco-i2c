@@ -30,7 +30,7 @@ const uint8_t data[] = {0x33, 0x55};
 Coroutine write(Loop &loop, Buffer &buffer) {
     while (buffer.ready()) {
         buffer.setHeader(command);
-        co_await buffer.writeArray(data);
+        co_await buffer.write(data);
 
         co_await loop.sleep(1s);
         debug::toggleBlue();

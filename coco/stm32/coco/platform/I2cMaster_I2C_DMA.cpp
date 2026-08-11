@@ -125,8 +125,8 @@ void I2cMaster_I2C_DMA::I2C_IRQHandler() {
             recovering_ = false;
             --recoverCount_;
         } else {
-            transfers_.pop(
-                [this, i2c](BufferBase &buffer) {
+            auto b = transfers_.pop();
+                /*[this, i2c](BufferBase &buffer) {
                     // set result
                     bool nack = (i2c->ISR & I2C_ISR_NACKF) != 0;
                     if (nack) {
@@ -149,9 +149,34 @@ void I2cMaster_I2C_DMA::I2C_IRQHandler() {
 
                     // pass buffer to event loop so that the application can be notified
                     loop_.push(buffer);
-                    return true;
+                    //return true;
                 }
-            );
+            );*/
+            if (b != nullptr) {
+                auto &buffer = *b;
+                bool nack = (i2c->ISR & I2C_ISR_NACKF) != 0;
+                if (nack) {
+                    // error: NACK
+                    /*if ((i2c->CR2 & I2C_CR2_AUTOEND) == 0) {
+                        // stopped when still transferring the header of a read operation: clear
+                        buffer.clear();
+                    } else {
+                        // stopped during read or write
+                        bool write = (buffer.op_ & BufferBase::Op::WRITE) != 0;
+                        buffer.size_ -= write ? txChannel_.count() : rxChannel_.count();
+                    }*/
+                    //buffer.result_ = BufferBase::Result::NO_REPLY;
+                    buffer.setError(std::errc::no_such_device_or_address);
+                } else {
+                    // success
+                    buffer.setSuccess();
+                    //buffer.result_ = BufferBase::Result::SUCCESS;
+                }
+                i2c->ICR = I2C_ICR_NACKCF;
+
+                // pass buffer to event loop so that the application can be notified
+                loop_.push(buffer);
+            }
         }
 
         if (recoverCount_ > 0) {
@@ -185,9 +210,13 @@ I2cMaster_I2C_DMA::BufferBase::~BufferBase() {
 }
 
 bool I2cMaster_I2C_DMA::BufferBase::start() {
-    if (state_ != State::READY || (op_ & Op::READ_WRITE) == 0 || size_ == 0) {
-        // starting a buffer when the state is BUSY is a bug
-        assert(state_ != State::BUSY);
+    if (state_ != State::READY) {
+        assert(false);
+        setError(std::errc::resource_unavailable_try_again);
+        return false;
+    }
+    if ((op_ & Op::READ_WRITE) == 0 || size_ == 0) {
+        setSuccess();
         return false;
     }
 
@@ -216,7 +245,7 @@ bool I2cMaster_I2C_DMA::BufferBase::cancel() {
     auto &device = channel_.device_;
 
     // remove from pending transfers if not yet started, otherwise complete normally
-    if (device.transfers_.remove(nvic::Guard(device.i2cIrq_), *this, false)) {
+    if (device.transfers_.guardedRemoveExceptFirst(nvic::Guard(device.i2cIrq_), *this)) {
         // cancel succeeded: set buffer ready again
         // resume application code, therefore interrupt is enabled at this point
         setError(std::errc::operation_canceled);
@@ -285,7 +314,7 @@ void I2cMaster_I2C_DMA::BufferBase::transfer() {
     }
 }
 
-void I2cMaster_I2C_DMA::BufferBase::handle() {
+void I2cMaster_I2C_DMA::BufferBase::onCompletion() {
     setReady();
 }
 
