@@ -1,7 +1,7 @@
 #pragma once
 
 #include <coco/platform/Loop_TIM2.hpp>
-#include <coco/platform/I2cMaster_I2C_DMA.hpp>
+#include <coco/platform/I2c_I2C_DMA.hpp>
 #include <coco/board/config.hpp>
 
 
@@ -12,11 +12,11 @@ using namespace coco;
 struct Drivers {
     Loop_TIM2 loop{APB1_TIMER_CLOCK};
 
-    using I2cMaster = I2cMaster_I2C_DMA;
+    using I2cMaster = I2c_I2C_DMA;
     I2cMaster i2c{loop,
+        i2c::I2C1_INFO,
         gpio::PB6 | gpio::AF4 | gpio::Config::PULL_UP | gpio::Config::SPEED_LOW | gpio::Config::DRIVE_DOWN, // I2C1 SCL (don't forget to lookup the alternate function number in the data sheet!)
         gpio::PB7 | gpio::AF4 | gpio::Config::PULL_UP | gpio::Config::SPEED_LOW | gpio::Config::DRIVE_DOWN, // I2C1 SDA
-        i2c::I2C1_INFO,
         dma::DMA1_CH3_CH2_INFO,
 
         //0x2000090E}; // timing for 100kHz I2C and 8MHz clock from STM32Cube

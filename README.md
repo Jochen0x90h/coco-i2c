@@ -3,7 +3,7 @@
 I2C module for CoCo
 
 ## Import
-Add coco-i2c/\<version> to your conanfile where version corresponds to the git tags
+Add coco-i2c/\<version> to your conanfile where version corresponds to a git tag.
 
 ## Features
 * I2C with multiple virtual channels, each using its own address

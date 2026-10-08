@@ -37,3 +37,5 @@ board_test(I2cMasterTest coco-devboards::native)
 board_test(I2cMasterTest coco-devboards::stm32f0discovery)
 board_test(I2cMasterTest coco-devboards::stm32f3348discovery)
 board_test(I2cMasterTest coco-devboards::nucleo-g431rb)
+
+board_test(I2cTargetTest coco-devboards::nucleo-g491re)

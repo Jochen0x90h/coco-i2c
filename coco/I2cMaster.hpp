@@ -5,7 +5,7 @@
 
 namespace coco {
 
-/// @brief Inter-integrated-circuit (I2C) abstraction.
+/// @brief Inter-integrated-circuit (I2C) controller (master) abstraction.
 ///
 class I2cMaster {
 public:
