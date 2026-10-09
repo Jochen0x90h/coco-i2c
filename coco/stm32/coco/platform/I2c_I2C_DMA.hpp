@@ -34,8 +34,9 @@ public:
     /// @param sdaPin data pin and alternate function (SDA, see data sheet), configure as open drain and maybe pull-up
     /// @param dmaInfo info of DMA channels to use
     /// @param timing timing configuration for register I2C_TIMINGR, use STM32CubeMX tool to calculate it
+    /// @param targetAddressFilter Address filter for target mode, enables target mode if set (currently only single address)
     I2c_I2C_DMA(Loop_Queue &loop, const i2c::Info &i2cInfo, gpio::Config sclPin, gpio::Config sdaPin,
-        const dma::DualInfo<> &dmaInfo, uint32_t timing, int slaveAddressFilter = 0);
+        const dma::DualInfo<> &dmaInfo, uint32_t timing, int targetAddressFilter = 0);
     ~I2c_I2C_DMA() override;
 
     // I2cMaster methods
@@ -125,10 +126,7 @@ public:
         Registers &registers() {return device_.registers_;}
 
         // start first transfer and return outstanding steps
-        virtual int transferFirst(BufferBase &buffer);
-
-        // start next transfer or return zero if no more steps to do
-        virtual int transferNext(BufferBase &buffer, int steps);
+        virtual void transferFirst(BufferBase &buffer);
 
         // start transfer of data (header or buffer)
         void start(BufferBase::Op op, volatile void *data, int size, uint32_t cr2);
@@ -162,7 +160,7 @@ public:
 
     protected:
         // Channel methods
-        int transferFirst(BufferBase &buffer) override;
+        void transferFirst(BufferBase &buffer) override;
 
         // number of address bytes (1 to 4)
         uint8_t addressBytes_;
