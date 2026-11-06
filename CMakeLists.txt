@@ -27,6 +27,7 @@ find_package(coco CONFIG)
 find_package(coco-loop CONFIG)
 find_package(coco-device CONFIG)
 find_package(coco-devboards CONFIG)
+find_package(coco-flash CONFIG)
 
 # source
 add_subdirectory(coco)

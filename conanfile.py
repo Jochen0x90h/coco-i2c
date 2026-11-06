@@ -25,6 +25,7 @@ class Project(ConanFile):
     def requirements(self):
         self.requires("coco-loop/linux", options={"platform": self.options.platform})
         self.requires("coco-device/linux", options={"platform": self.options.platform})
+        self.requires("coco-flash/linux", options={"platform": self.options.platform})
 
     def build_requirements(self):
         self.test_requires("coco-devboards/linux", options={"platform": self.options.platform})

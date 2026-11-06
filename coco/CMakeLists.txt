@@ -28,8 +28,10 @@ elseif(${PLATFORM} MATCHES "^stm32")
     target_sources(${PROJECT_NAME}
         PUBLIC FILE_SET platform_headers TYPE HEADERS BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/stm32 FILES
             stm32/coco/platform/I2c_I2C_DMA.hpp
+            stm32/coco/platform/I2cEeEmu_I2C_DMA.hpp
         PRIVATE
             stm32/coco/platform/I2c_I2C_DMA.cpp
+            stm32/coco/platform/I2cEeEmu_I2C_DMA.cpp
     )
 endif()
 
@@ -37,6 +39,7 @@ target_link_libraries(${PROJECT_NAME}
     coco::coco
     coco-loop::coco-loop
     coco-device::coco-device
+    coco-flash::coco-flash
 )
 
 target_include_directories(${PROJECT_NAME}

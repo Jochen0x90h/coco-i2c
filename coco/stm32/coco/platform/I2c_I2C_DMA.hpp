@@ -1,13 +1,14 @@
+
+
+
 #pragma once
 
 #include <coco/I2cMaster.hpp>
-#include <coco/align.hpp>
 #include <coco/InterruptQueue.hpp>
 #include <coco/platform/Loop_Queue.hpp>
 #include <coco/platform/dma.hpp>
 #include <coco/platform/gpio.hpp>
 #include <coco/platform/i2c.hpp>
-#include <coco/platform/nvic.hpp>
 
 
 namespace coco {
@@ -230,6 +231,8 @@ public:
             return {this->tasks_, Events::REQUEST};
         }
 
+        /// @brief Get operation that is requested by the controller.
+        /// @return Requested op (READ or WRITE)
         coco::Buffer::Op requestedOp();
 
     protected:
@@ -278,7 +281,7 @@ protected:
 
     // list of active transfers
     InterruptQueue<BufferBase> transfers_;
-    int transferCount_;
+    int reloadCount_;
 
     IntrusiveList<TargetChannel> targetChannels_;
     TargetBufferBase *targetTransfer_ = nullptr;

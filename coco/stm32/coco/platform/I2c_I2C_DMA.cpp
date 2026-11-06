@@ -1,6 +1,7 @@
 #include "I2c_I2C_DMA.hpp"
 //#include <coco/convert.hpp>
 //#include <coco/debug.hpp>
+#include <coco/platform/nvic.hpp>
 #include <algorithm>
 
 
@@ -29,9 +30,9 @@ I2c_I2C_DMA::I2c_I2C_DMA(Loop_Queue &loop, const i2c::Info &i2cInfo, gpio::Confi
     // configure I2C
     auto i2c = r.i2c = i2cInfo.enableClock()
         .enable(targetAddressFilter != 0 ? i2c::Config::TARGET_BYTE_CONTROL : i2c::Config::DEFAULT, timing,
-            i2c::Interrupt::TRANSFER_COMPLETE
-            | i2c::Interrupt::STOP_DETECTED
-            | (targetAddressFilter != 0 ? i2c::Interrupt::ADDRESS_MATCH : i2c::Interrupt::NONE),
+            (targetAddressFilter != 0 ? i2c::Interrupt::ADDRESS_MATCH : i2c::Interrupt::TRANSFER_COMPLETE)
+            | i2c::Interrupt::RELOAD
+            | i2c::Interrupt::STOP_DETECTED,
             i2c::DmaRequest::RX_TX);
 
     // enable own address 1 if filter is set
@@ -76,20 +77,19 @@ void I2c_I2C_DMA::I2C_IRQHandler() {
     auto i2c = r.i2c;
     auto status = i2c.status();
     if ((status & i2c::Status::ADDRESS_MATCH) != 0) {
-        // target mode: address matched
+        // address matched (target mode): interrupt flag gets cleard and clock stretch released by setting the ADDRCF bit
 
         // disable interrupt (stretch clock) until a new data transfer is started (TargetBuffer::start())
         i2c.disable(i2c::Interrupt::ADDRESS_MATCH);
 
-        // get address
+        // get target address that was addressed by the controller
         int address = getAddress(status);
 
-        // get read flag (controller read means we have to write)
+        // get read flag (read when controller sent a write request)
         //bool read = (status & i2c::Status::DIRECTION_MASK) == i2c::Status::DIRECTION_WRITE;
-
         //debug::out << hex(this) << " AM " << hex(address) << ' ' << dec(read) << '\n';
 
-        // release current transfer (e.g. write, restart, read)
+        // release current transfer (a transfer is still active when a read follows a write without stop)
         if (targetTransfer_ != nullptr) {
             // disable DMA
             r.dma.rx.disable();
@@ -119,7 +119,7 @@ void I2c_I2C_DMA::I2C_IRQHandler() {
         }
     } else if ((status & i2c::Status::RELOAD) != 0) {
         // reload: interrupt flag gets cleared by writing NBYTES
-        int count = transferCount_;
+        int count = reloadCount_;
         //debug::out << hex(this) << " reaload " << dec(count) << '\n';
 
         if (count > 0) {
@@ -129,10 +129,10 @@ void I2c_I2C_DMA::I2C_IRQHandler() {
             if (count > 255) {
                 // reload after 255 bytes
                 cr2 |= I2C_CR2_RELOAD | (255 << I2C_CR2_NBYTES_Pos);
-                transferCount_ = count - 255;
+                reloadCount_ = count - 255;
             } else {
                 cr2 |= reload_ | (count << I2C_CR2_NBYTES_Pos);
-                transferCount_ = 0;
+                reloadCount_ = 0;
             }
             i2c->CR2 = cr2;
 
@@ -454,10 +454,10 @@ void I2c_I2C_DMA::Channel::start(BufferBase::Op op, volatile void *data, int siz
     if (size > 255) {
         // reload after 255 bytes
         cr2 |= I2C_CR2_RELOAD | (255 << I2C_CR2_NBYTES_Pos);
-        device.transferCount_ = size - 255;
+        device.reloadCount_ = size - 255;
     } else {
         cr2 |= size << I2C_CR2_NBYTES_Pos;
-        device.transferCount_ = 0;
+        device.reloadCount_ = 0;
     }
     r.i2c->CR2 = cr2;
 
@@ -629,7 +629,7 @@ void I2c_I2C_DMA::TargetChannel::start(BufferBase::Op op, volatile void *data, i
             .setSourceAddress(data)
             .setCount(size)
             .enable();
-        r.dma.rx.setCount(0);
+        //r.dma.rx.setCount(0);
         //debug::out << hex(&device) << " dma TX " << dec(r.dma.tx.count()) << '\n';
     }
 
@@ -640,10 +640,10 @@ void I2c_I2C_DMA::TargetChannel::start(BufferBase::Op op, volatile void *data, i
     if (size > 255) {
         // reload after 255 bytes
         cr2 |= (255 << I2C_CR2_NBYTES_Pos);
-        device.transferCount_ = size - 255;
+        device.reloadCount_ = size - 255;
     } else {
         cr2 |= (size << I2C_CR2_NBYTES_Pos);
-        device.transferCount_ = 0;
+        device.reloadCount_ = 0;
     }
     r.i2c->CR2 = cr2;
 
